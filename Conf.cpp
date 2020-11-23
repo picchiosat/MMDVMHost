@@ -57,7 +57,6 @@ enum SECTION {
   SECTION_OLED,
   SECTION_LCDPROC,
   SECTION_LOCK_FILE,
-  SECTION_GPSD,
   SECTION_REMOTE_CONTROL
 };
 
@@ -72,16 +71,11 @@ m_daemon(false),
 m_rxFrequency(0U),
 m_txFrequency(0U),
 m_power(0U),
-m_latitude(0.0F),
-m_longitude(0.0F),
-m_height(0),
-m_location(),
-m_description(),
-m_url(),
 m_logDisplayLevel(0U),
 m_logFileLevel(0U),
 m_logFilePath(),
 m_logFileRoot(),
+m_logFileRotate(true),
 m_cwIdEnabled(false),
 m_cwIdTime(10U),
 m_cwIdCallsign(),
@@ -126,6 +120,7 @@ m_dstarEnabled(false),
 m_dstarModule("C"),
 m_dstarSelfOnly(false),
 m_dstarBlackList(),
+m_dstarWhiteList(),
 m_dstarAckReply(true),
 m_dstarAckTime(750U),
 m_dstarAckMessage(false),
@@ -282,10 +277,8 @@ m_lcdprocUTC(false),
 m_lcdprocDimOnIdle(false),
 m_lockFileEnabled(false),
 m_lockFileName(),
-m_gpsdEnabled(false),
-m_gpsdAddress(),
-m_gpsdPort(),
 m_remoteControlEnabled(false),
+m_remoteControlAddress("127.0.0.1"),
 m_remoteControlPort(0U)
 {
 }
@@ -366,8 +359,6 @@ bool CConf::read()
 		  section = SECTION_LCDPROC;
 	  else if (::strncmp(buffer, "[Lock File]", 11U) == 0)
 		  section = SECTION_LOCK_FILE;
-	  else if (::strncmp(buffer, "[GPSD]", 6U) == 0)
-		  section = SECTION_GPSD;
 	  else if (::strncmp(buffer, "[Remote Control]", 16U) == 0)
 		  section = SECTION_REMOTE_CONTROL;
 	  else
@@ -432,18 +423,6 @@ bool CConf::read()
 			m_rxFrequency = (unsigned int)::atoi(value);
 		else if (::strcmp(key, "Power") == 0)
 			m_power = (unsigned int)::atoi(value);
-		else if (::strcmp(key, "Latitude") == 0)
-			m_latitude = float(::atof(value));
-		else if (::strcmp(key, "Longitude") == 0)
-			m_longitude = float(::atof(value));
-		else if (::strcmp(key, "Height") == 0)
-			m_height = ::atoi(value);
-		else if (::strcmp(key, "Location") == 0)
-			m_location = value;
-		else if (::strcmp(key, "Description") == 0)
-			m_description = value;
-		else if (::strcmp(key, "URL") == 0)
-			m_url = value;
 	} else if (section == SECTION_LOG) {
 		if (::strcmp(key, "FilePath") == 0)
 			m_logFilePath = value;
@@ -453,6 +432,8 @@ bool CConf::read()
 			m_logFileLevel = (unsigned int)::atoi(value);
 		else if (::strcmp(key, "DisplayLevel") == 0)
 			m_logDisplayLevel = (unsigned int)::atoi(value);
+		else if (::strcmp(key, "FileRotate") == 0)
+			m_logFileRotate = ::atoi(value) == 1;
 	} else if (section == SECTION_CWID) {
 		if (::strcmp(key, "Enable") == 0)
 			m_cwIdEnabled = ::atoi(value) == 1;
@@ -567,6 +548,18 @@ bool CConf::read()
 				}
 				p = ::strtok(NULL, ",\r\n");
 			}
+		} else if (::strcmp(key, "WhiteList") == 0) {
+                        char* p = ::strtok(value, ",\r\n");
+                        while (p != NULL) {
+                                if (::strlen(p) > 0U) {
+                                        for (unsigned int i = 0U; p[i] != 0; i++)
+                                                p[i] = ::toupper(p[i]);
+                                        std::string callsign = std::string(p);
+                                        callsign.resize(DSTAR_LONG_CALLSIGN_LENGTH, ' ');
+                                        m_dstarWhiteList.push_back(callsign);
+                                }
+                                p = ::strtok(NULL, ",\r\n");
+                        }
 		} else if (::strcmp(key, "AckReply") == 0)
 			m_dstarAckReply = ::atoi(value) == 1;
 		else if (::strcmp(key, "AckTime") == 0)
@@ -959,16 +952,11 @@ bool CConf::read()
 			m_lockFileEnabled = ::atoi(value) == 1;
 		else if (::strcmp(key, "File") == 0)
 			m_lockFileName = value;
-	} else if (section == SECTION_GPSD) {
-		if (::strcmp(key, "Enable") == 0)
-			m_gpsdEnabled = ::atoi(value) == 1;
-		else if (::strcmp(key, "Address") == 0)
-			m_gpsdAddress = value;
-		else if (::strcmp(key, "Port") == 0)
-			m_gpsdPort = value;
 	} else if (section == SECTION_REMOTE_CONTROL) {
 		if (::strcmp(key, "Enable") == 0)
 			m_remoteControlEnabled = ::atoi(value) == 1;
+		else if (::strcmp(key, "Address") == 0)
+			m_remoteControlAddress = value;
 		else if (::strcmp(key, "Port") == 0)
 			m_remoteControlPort = (unsigned int)::atoi(value);
 	}
@@ -1024,36 +1012,6 @@ unsigned int CConf::getPower() const
 	return m_power;
 }
 
-float CConf::getLatitude() const
-{
-	return m_latitude;
-}
-
-float CConf::getLongitude() const
-{
-	return m_longitude;
-}
-
-int CConf::getHeight() const
-{
-	return m_height;
-}
-
-std::string CConf::getLocation() const
-{
-	return m_location;
-}
-
-std::string CConf::getDescription() const
-{
-	return m_description;
-}
-
-std::string CConf::getURL() const
-{
-	return m_url;
-}
-
 unsigned int CConf::getLogDisplayLevel() const
 {
 	return m_logDisplayLevel;
@@ -1072,6 +1030,11 @@ std::string CConf::getLogFilePath() const
 std::string CConf::getLogFileRoot() const
 {
 	return m_logFileRoot;
+}
+
+bool CConf::getLogFileRotate() const
+{
+	return m_logFileRotate;
 }
 
 bool CConf::getCWIdEnabled() const
@@ -1292,6 +1255,11 @@ bool CConf::getDStarSelfOnly() const
 std::vector<std::string> CConf::getDStarBlackList() const
 {
 	return m_dstarBlackList;
+}
+
+std::vector<std::string> CConf::getDStarWhiteList() const
+{
+        return m_dstarWhiteList;
 }
 
 bool CConf::getDStarAckReply() const
@@ -2075,24 +2043,14 @@ std::string CConf::getLockFileName() const
 	return m_lockFileName;
 }
 
-bool CConf::getGPSDEnabled() const
-{
-	return m_gpsdEnabled;
-}
-
-std::string CConf::getGPSDAddress() const
-{
-	return m_gpsdAddress;
-}
-
-std::string CConf::getGPSDPort() const
-{
-	return m_gpsdPort;
-}
-
 bool CConf::getRemoteControlEnabled() const
 {
 	return m_remoteControlEnabled;
+}
+
+std::string CConf::getRemoteControlAddress() const
+{
+	return m_remoteControlAddress;
 }
 
 unsigned int CConf::getRemoteControlPort() const

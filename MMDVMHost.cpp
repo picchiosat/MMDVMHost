@@ -161,16 +161,15 @@ m_id(0U),
 m_cwCallsign(),
 m_lockFileEnabled(false),
 m_lockFileName(),
-#if defined(USE_GPSD)
-m_gpsd(NULL),
-#endif
 m_remoteControl(NULL),
 m_fixedMode(false)
 {
+	CUDPSocket::startup();
 }
 
 CMMDVMHost::~CMMDVMHost()
 {
+	CUDPSocket::shutdown();
 }
 
 int CMMDVMHost::run()
@@ -242,9 +241,9 @@ int CMMDVMHost::run()
 #endif
 
 #if !defined(_WIN32) && !defined(_WIN64)
-	ret = ::LogInitialise(m_daemon, m_conf.getLogFilePath(), m_conf.getLogFileRoot(), m_conf.getLogFileLevel(), m_conf.getLogDisplayLevel());
+	ret = ::LogInitialise(m_daemon, m_conf.getLogFilePath(), m_conf.getLogFileRoot(), m_conf.getLogFileLevel(), m_conf.getLogDisplayLevel(), m_conf.getLogFileRotate());
 #else
-	ret = ::LogInitialise(false, m_conf.getLogFilePath(), m_conf.getLogFileRoot(), m_conf.getLogFileLevel(), m_conf.getLogDisplayLevel());
+	ret = ::LogInitialise(false, m_conf.getLogFilePath(), m_conf.getLogFileRoot(), m_conf.getLogFileLevel(), m_conf.getLogDisplayLevel(), m_conf.getLogFileRotate());
 #endif
 	if (!ret) {
 		::fprintf(stderr, "MMDVMHost: unable to open the log file\n");
@@ -324,8 +323,8 @@ int CMMDVMHost::run()
 			return 1;
 	}
 
-	in_addr transparentAddress;
-	unsigned int transparentPort = 0U;
+	sockaddr_storage transparentAddress;
+	unsigned int transparentAddrLen;
 	CUDPSocket* transparentSocket = NULL;
 
 	unsigned int sendFrameType = 0U;
@@ -341,11 +340,13 @@ int CMMDVMHost::run()
 		LogInfo("    Local Port: %u", localPort);
 		LogInfo("    Send Frame Type: %u", sendFrameType);
 
-		transparentAddress = CUDPSocket::lookup(remoteAddress);
-		transparentPort    = remotePort;
+		if (CUDPSocket::lookup(remoteAddress, remotePort, transparentAddress, transparentAddrLen) != 0) {
+			LogError("Unable to resolve the address of the Transparent Data source");
+			return 1;
+		}
 
 		transparentSocket = new CUDPSocket(localPort);
-		ret = transparentSocket->open();
+		ret = transparentSocket->open(transparentAddress);
 		if (!ret) {
 			LogWarning("Could not open the Transparent data socket, disabling");
 			delete transparentSocket;
@@ -410,6 +411,7 @@ int CMMDVMHost::run()
 		std::string module                 = m_conf.getDStarModule();
 		bool selfOnly                      = m_conf.getDStarSelfOnly();
 		std::vector<std::string> blackList = m_conf.getDStarBlackList();
+		std::vector<std::string> whiteList = m_conf.getDStarWhiteList();
 		bool ackReply                      = m_conf.getDStarAckReply();
 		unsigned int ackTime               = m_conf.getDStarAckTime();
 		bool ackMessage                    = m_conf.getDStarAckMessage();
@@ -429,8 +431,10 @@ int CMMDVMHost::run()
 
 		if (blackList.size() > 0U)
 			LogInfo("    Black List: %u", blackList.size());
+		if (whiteList.size() > 0U)
+			LogInfo("    White List: %u", whiteList.size());
 
-		m_dstar = new CDStarControl(m_callsign, module, selfOnly, ackReply, ackTime, ackMessage, errorReply, blackList, m_dstarNetwork, m_display, m_timeout, m_duplex, remoteGateway, rssi);
+		m_dstar = new CDStarControl(m_callsign, module, selfOnly, ackReply, ackTime, ackMessage, errorReply, blackList, whiteList, m_dstarNetwork, m_display, m_timeout, m_duplex, remoteGateway, rssi);
 	}
 
 	DMR_BEACONS dmrBeacons = DMR_BEACONS_OFF;
@@ -614,12 +618,14 @@ int CMMDVMHost::run()
 
 	bool remoteControlEnabled = m_conf.getRemoteControlEnabled();
 	if (remoteControlEnabled) {
+		std::string address = m_conf.getRemoteControlAddress();
 		unsigned int port = m_conf.getRemoteControlPort();
 
 		LogInfo("Remote Control Parameters");
+		LogInfo("    Address: %s", address.c_str());
 		LogInfo("    Port: %u", port);
 
-		m_remoteControl = new CRemoteControl(port);
+		m_remoteControl = new CRemoteControl(address, port);
 
 		ret = m_remoteControl->open();
 		if (!ret) {
@@ -806,7 +812,7 @@ int CMMDVMHost::run()
 
 		len = m_modem->readTransparentData(data);
 		if (transparentSocket != NULL && len > 0U)
-			transparentSocket->write(data, len, transparentAddress, transparentPort);
+			transparentSocket->write(data, len, transparentAddress, transparentAddrLen);
 
 		if (!m_fixedMode) {
 			if (m_modeTimer.isRunning() && m_modeTimer.hasExpired())
@@ -955,9 +961,9 @@ int CMMDVMHost::run()
 		}
 
 		if (transparentSocket != NULL) {
-			in_addr address;
-			unsigned int port = 0U;
-			len = transparentSocket->read(data, 200U, address, port);
+			sockaddr_storage address;
+			unsigned int addrlen;
+			len = transparentSocket->read(data, 200U, address, addrlen);
 			if (len > 0U)
 				m_modem->writeTransparentData(data, len);
 		}
@@ -999,11 +1005,6 @@ int CMMDVMHost::run()
 			m_nxdnNetwork->clock(ms);
 		if (m_pocsagNetwork != NULL)
 			m_pocsagNetwork->clock(ms);
-
-#if defined(USE_GPSD)
-		if (m_gpsd != NULL)
-			m_gpsd->clock(ms);
-#endif
 
 		m_cwIdTimer.clock(ms);
 		if (m_cwIdTimer.isRunning() && m_cwIdTimer.hasExpired()) {
@@ -1079,13 +1080,6 @@ int CMMDVMHost::run()
 
 	m_display->close();
 	delete m_display;
-
-#if defined(USE_GPSD)
-	if (m_gpsd != NULL) {
-		m_gpsd->close();
-		delete m_gpsd;
-	}
-#endif
 
 	if (m_ump != NULL) {
 		m_ump->close();
@@ -1354,38 +1348,20 @@ bool CMMDVMHost::createDMRNetwork()
 	LogInfo("    Slot 2: %s", slot2 ? "enabled" : "disabled");
 	LogInfo("    Mode Hang: %us", m_dmrNetModeHang);
 
-	m_dmrNetwork = new CDMRNetwork(address, port, local, id, password, m_duplex, VERSION, debug, slot1, slot2, hwType);
-
-	std::string options = m_conf.getDMRNetworkOptions();
-	if (!options.empty()) {
-		LogInfo("    Options: %s", options.c_str());
-		m_dmrNetwork->setOptions(options);
-	}
+	m_dmrNetwork = new CDMRNetwork(address, port, local, id, m_duplex, VERSION, debug, slot1, slot2, hwType);
 
 	unsigned int rxFrequency = m_conf.getRXFrequency();
 	unsigned int txFrequency = m_conf.getTXFrequency();
 	unsigned int power       = m_conf.getPower();
 	unsigned int colorCode   = m_conf.getDMRColorCode();
-	float latitude           = m_conf.getLatitude();
-	float longitude          = m_conf.getLongitude();
-	int height               = m_conf.getHeight();
-	std::string location     = m_conf.getLocation();
-	std::string description  = m_conf.getDescription();
-	std::string url          = m_conf.getURL();
 
 	LogInfo("Info Parameters");
 	LogInfo("    Callsign: %s", m_callsign.c_str());
 	LogInfo("    RX Frequency: %uHz", rxFrequency);
 	LogInfo("    TX Frequency: %uHz", txFrequency);
 	LogInfo("    Power: %uW", power);
-	LogInfo("    Latitude: %fdeg N", latitude);
-	LogInfo("    Longitude: %fdeg E", longitude);
-	LogInfo("    Height: %um", height);
-	LogInfo("    Location: \"%s\"", location.c_str());
-	LogInfo("    Description: \"%s\"", description.c_str());
-	LogInfo("    URL: \"%s\"", url.c_str());
 
-	m_dmrNetwork->setConfig(m_callsign, rxFrequency, txFrequency, power, colorCode, latitude, longitude, height, location, description, url);
+	m_dmrNetwork->setConfig(m_callsign, rxFrequency, txFrequency, power, colorCode);
 
 	bool ret = m_dmrNetwork->open();
 	if (!ret) {
@@ -1394,26 +1370,6 @@ bool CMMDVMHost::createDMRNetwork()
 		return false;
 	}
 
-#if defined(USE_GPSD)
-	bool gpsdEnabled = m_conf.getGPSDEnabled();
-	if (gpsdEnabled) {
-		std::string gpsdAddress = m_conf.getGPSDAddress();
-		std::string gpsdPort    = m_conf.getGPSDPort();
-
-		LogInfo("GPSD Parameters");
-		LogInfo("    Address: %s", gpsdAddress.c_str());
-		LogInfo("    Port: %s", gpsdPort.c_str());
-
-		m_gpsd = new CGPSD(gpsdAddress, gpsdPort, m_dmrNetwork);
-
-		ret = m_gpsd->open();
-		if (!ret) {
-			delete m_gpsd;
-			m_gpsd = NULL;
-		}
-	}
-#endif
-
 	m_dmrNetwork->enable(true);
 
 	return true;
@@ -1421,12 +1377,12 @@ bool CMMDVMHost::createDMRNetwork()
 
 bool CMMDVMHost::createYSFNetwork()
 {
-	std::string myAddress  = m_conf.getFusionNetworkMyAddress();
-	unsigned int myPort    = m_conf.getFusionNetworkMyPort();
+	std::string myAddress      = m_conf.getFusionNetworkMyAddress();
+	unsigned int myPort        = m_conf.getFusionNetworkMyPort();
 	std::string gatewayAddress = m_conf.getFusionNetworkGatewayAddress();
 	unsigned int gatewayPort   = m_conf.getFusionNetworkGatewayPort();
-	m_ysfNetModeHang       = m_conf.getFusionNetworkModeHang();
-	bool debug             = m_conf.getFusionNetworkDebug();
+	m_ysfNetModeHang           = m_conf.getFusionNetworkModeHang();
+	bool debug                 = m_conf.getFusionNetworkDebug();
 
 	LogInfo("System Fusion Network Parameters");
 	LogInfo("    Local Address: %s", myAddress.c_str());
